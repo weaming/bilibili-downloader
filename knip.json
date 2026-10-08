@@ -4,9 +4,11 @@
     "src/background/service-worker.ts",
     "src/content/bridge.ts",
     "src/content/main.ts",
+    "src/content/probe.ts",
     "src/ffmpeg/runtime.ts",
     "src/popup/main.ts",
-    "src/shared/format.test.ts"
+    "src/shared/format.test.ts",
+    "src/shared/types.test.ts"
   ],
   "project": ["src/**/*.ts", "scripts/**/*.ts"],
   "ignore": ["dist/**", "public/**"],

@@ -21,5 +21,6 @@ export function formatTime(seconds: number): string {
 }
 
 export function sanitizeFilename(name: string): string {
-  return name.replace(/[\\/:*?"<>|]/g, "").trim() || "bilibili";
+  const sanitized = name.replace(/[\\/:*?"<>|]/g, "").trim().slice(0, 180).replace(/[ .]+$/, "");
+  return sanitized || "bilibili";
 }

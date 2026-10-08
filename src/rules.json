@@ -11,6 +11,7 @@
     },
     "condition": {
       "regexFilter": "https:\\/\\/(?:[^\\/]*\\.)?(bilivideo\\.com|hdslb\\.com)\\/",
+      "initiatorDomains": ["bilibili.com", "www.bilibili.com", "m.bilibili.com", "youtube.com", "www.youtube.com"],
       "resourceTypes": ["xmlhttprequest", "media", "other"]
     }
   },
@@ -26,6 +27,7 @@
     },
     "condition": {
       "regexFilter": "https:\\/\\/(?:[^\\/]*\\.)?(bilivideo\\.com|hdslb\\.com)\\/",
+      "initiatorDomains": ["bilibili.com", "www.bilibili.com", "m.bilibili.com", "youtube.com", "www.youtube.com"],
       "resourceTypes": ["xmlhttprequest", "media", "other"]
     }
   }

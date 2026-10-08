@@ -7,12 +7,31 @@ export interface DownloadStatus {
   done?: boolean;
   error?: boolean;
   filename?: string;
+  pageKey?: string;
   ts?: number;
+}
+
+export type DownloadMode = "video" | "audio";
+
+const DOWNLOAD_STATUS_KEY_PREFIX = "vd_status:";
+
+export function getDownloadStatusKey(tabId: number): string {
+  return `${DOWNLOAD_STATUS_KEY_PREFIX}${tabId}`;
+}
+
+export function getDownloadPageKey(url: string): string {
+  try {
+    const parsedUrl = new URL(url);
+    return `${parsedUrl.origin}${parsedUrl.pathname}${parsedUrl.search}`;
+  } catch {
+    return url.split("#", 1)[0];
+  }
 }
 
 export type RuntimeMessage =
   | { type: "start-download" }
-  | { type: "download-direct"; url: string; filename?: string };
+  | { type: "download-direct"; url: string; filename?: string }
+  | { type: "status-update"; status: DownloadStatus };
 
 export interface DownloadResponse {
   ok: boolean;
@@ -45,6 +64,15 @@ export interface BilibiliDash {
   audio?: DashMedia[];
 }
 
+interface BilibiliDurl {
+  url?: string;
+}
+
+export interface BilibiliPlayData {
+  dash?: BilibiliDash;
+  durl?: BilibiliDurl[];
+}
+
 interface BilibiliPlayInfo {
   dash?: BilibiliDash;
 }
@@ -54,8 +82,18 @@ export interface FFmpegWasmNamespace {
 }
 
 export interface BilibiliViewData {
+  aid?: number;
   cid?: number;
   pages?: Array<{ cid?: number; page?: number }>;
+}
+
+export interface BilibiliPlayerContext {
+  aid?: number;
+  bvid?: string;
+  cid?: number;
+  epId?: number;
+  qn?: number;
+  pageKey?: string;
 }
 
 export interface YouTubeFormat {
@@ -74,6 +112,8 @@ declare global {
   interface Window {
     __BILI_DOWNLOAD_BRIDGE_READY__?: boolean;
     __BILI_DOWNLOAD_RUNNING__?: boolean;
+    __BILI_DOWNLOAD_MODE__?: DownloadMode;
+    __BILI_PLAYER_CONTEXT__?: BilibiliPlayerContext;
     __FFMPEG_CLASS_WORKER_URL__?: string;
     __FFMPEG_CORE_URL__?: string;
     __FFMPEG_WASM_URL__?: string;

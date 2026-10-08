@@ -15,5 +15,6 @@ describe("下载显示格式", () => {
   test("清理下载文件名", () => {
     expect(sanitizeFilename("视频:/测试?*")).toBe("视频测试");
     expect(sanitizeFilename("   ")).toBe("bilibili");
+    expect(sanitizeFilename(`${"a".repeat(200)}.`)).toHaveLength(180);
   });
 });

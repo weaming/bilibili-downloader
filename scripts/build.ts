@@ -60,6 +60,7 @@ await Promise.all([
   buildSource("background/service-worker.ts", "service_worker.js"),
   buildSource("content/bridge.ts", "content_bridge.js"),
   buildSource("content/main.ts", "content_merge.js"),
+  buildSource("content/probe.ts", "content_probe.js"),
   buildSource("popup/main.ts", "popup.js"),
   buildBundle(
     join(sourceRoot, "ffmpeg/runtime.ts"),

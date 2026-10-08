@@ -1,8 +1,11 @@
 import type {
   BilibiliDash,
+  BilibiliPlayData,
+  BilibiliPlayerContext,
   BilibiliViewData,
   DashMedia,
   DirectDownloadResult,
+  DownloadMode,
   DownloadStatus,
   FFmpegWasmNamespace,
   YouTubeFormat,
@@ -29,8 +32,17 @@ interface FFmpegSession {
   release(): void;
 }
 
+interface BilibiliApiResponse<T> {
+  code?: number;
+  message?: string;
+  data?: T;
+  result?: T;
+}
+
 const controller = new AbortController();
 const signal = controller.signal;
+const BILIBILI_API_TIMEOUT_MS = 20_000;
+const BILIBILI_API_RETRY_DELAY_MS = 250;
 
 function reportStatus(status: DownloadStatus): void {
   window.dispatchEvent(new CustomEvent<DownloadStatus>("BILI_DOWN_STATUS", { detail: status }));
@@ -57,6 +69,7 @@ function createOverlay(): DownloadOverlay {
   let startY = 0;
   let initialLeft = 0;
   let initialTop = 0;
+  let isRemoved = false;
 
   element.addEventListener("mousedown", (event: MouseEvent) => {
     if (event.target === cancelButton) {
@@ -86,6 +99,17 @@ function createOverlay(): DownloadOverlay {
 
   const stopDragging = (): void => {
     isDragging = false;
+  };
+
+  const removeOverlay = (): void => {
+    if (isRemoved) {
+      return;
+    }
+
+    isRemoved = true;
+    window.removeEventListener("mousemove", moveOverlay);
+    window.removeEventListener("mouseup", stopDragging);
+    element.remove();
   };
 
   window.addEventListener("mousemove", moveOverlay);
@@ -132,7 +156,7 @@ function createOverlay(): DownloadOverlay {
   });
   cancelButton.addEventListener("click", () => {
     controller.abort();
-    element.remove();
+    removeOverlay();
     reportStatus({ step: "已取消", progress: 0, detail: "用户取消下载", error: true });
   });
   element.appendChild(cancelButton);
@@ -152,11 +176,7 @@ function createOverlay(): DownloadOverlay {
       element.style.background = "rgba(0,0,0,0.55)";
       cancelButton.style.display = "none";
     },
-    remove: () => {
-      window.removeEventListener("mousemove", moveOverlay);
-      window.removeEventListener("mouseup", stopDragging);
-      element.remove();
-    }
+    remove: removeOverlay
   };
 }
 
@@ -165,6 +185,58 @@ async function parseJson<T>(response: Response): Promise<T> {
     throw new Error(`请求失败: ${response.status}`);
   }
   return (await response.json()) as T;
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const requestController = new AbortController();
+  const abortByDownload = (): void => requestController.abort();
+  const timeoutId = window.setTimeout(() => requestController.abort(), timeoutMs);
+  if (signal.aborted) {
+    requestController.abort();
+  } else {
+    signal.addEventListener("abort", abortByDownload, { once: true });
+  }
+
+  try {
+    const response = await fetch(url, { ...init, signal: requestController.signal });
+    if (requestController.signal.aborted && !signal.aborted) {
+      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)}秒）`);
+    }
+    return response;
+  } catch (error: unknown) {
+    if (requestController.signal.aborted && !signal.aborted) {
+      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)}秒）`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+    signal.removeEventListener("abort", abortByDownload);
+  }
+}
+
+async function fetchBilibiliApi(url: string, init: RequestInit): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(url, init, BILIBILI_API_TIMEOUT_MS);
+      if (response.status < 500 || attempt === 1) {
+        return response;
+      }
+      await response.body?.cancel();
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === "AbortError" && signal.aborted) {
+        throw error;
+      }
+      lastError = error;
+      if (attempt === 1) {
+        throw error;
+      }
+    }
+
+    await new Promise<void>((resolve) => window.setTimeout(resolve, BILIBILI_API_RETRY_DELAY_MS));
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("B 站接口请求失败");
 }
 
 async function resolveYouTube(): Promise<ResolvedMedia | null> {
@@ -199,7 +271,20 @@ async function resolveYouTube(): Promise<ResolvedMedia | null> {
 }
 
 function getBilibiliId(): string {
-  return location.pathname.match(/\/video\/(BV[\w]+)/i)?.[1] || "";
+  return location.pathname.match(/\/video\/(BV[\w]+)/i)?.[1] || getCurrentPlayerContext()?.bvid || "";
+}
+
+function getBilibiliAid(): string {
+  const aid = location.pathname.match(/\/video\/av(\d+)/i)?.[1] || getCurrentPlayerContext()?.aid;
+  return aid ? String(aid) : "";
+}
+
+function getCurrentPlayerContext(): BilibiliPlayerContext | undefined {
+  const context = window.__BILI_PLAYER_CONTEXT__;
+  if (!context || context.pageKey !== `${location.pathname}${location.search}`) {
+    return undefined;
+  }
+  return context;
 }
 
 function getBilibiliPageNumber(): number {
@@ -208,54 +293,235 @@ function getBilibiliPageNumber(): number {
 }
 
 function getBilibiliCid(data: BilibiliViewData): number | undefined {
+  const capturedCid = getCurrentPlayerContext()?.cid;
+  if (capturedCid) {
+    return capturedCid;
+  }
+
   const pages = data.pages || [];
   const currentPage = pages[getBilibiliPageNumber() - 1];
   return currentPage?.cid || data.cid || pages[0]?.cid;
 }
 
+function getBilibiliApiError<T>(payload: BilibiliApiResponse<T>): Error | null {
+  if (payload.code === undefined || payload.code === 0) {
+    return null;
+  }
+
+  const detail = payload.message ? `: ${payload.message}` : "";
+  return new Error(`B 站接口错误 (${payload.code})${detail}`);
+}
+
+async function fetchBilibiliViewData(bvid: string, aid: string): Promise<BilibiliViewData | null> {
+  const viewParams = new URLSearchParams(bvid ? { bvid } : { aid });
+  const response = await fetchBilibiliApi(`https://api.bilibili.com/x/web-interface/view?${viewParams}`, {
+    credentials: "include",
+    cache: "no-store",
+    signal
+  });
+  const payload = await parseJson<BilibiliApiResponse<BilibiliViewData>>(response);
+  const error = getBilibiliApiError(payload);
+  if (error) {
+    throw error;
+  }
+  return payload.data || null;
+}
+
+async function getBilibiliCidForRequest(bvid: string, aid: string): Promise<number | undefined> {
+  const capturedCid = getCurrentPlayerContext()?.cid;
+  if (capturedCid) {
+    return capturedCid;
+  }
+
+  const viewData = await fetchBilibiliViewData(bvid, aid);
+  return viewData ? getBilibiliCid(viewData) : undefined;
+}
+
+function getBilibiliEpisodeId(): number | undefined {
+  const contextEpisodeId = getCurrentPlayerContext()?.epId;
+  if (contextEpisodeId) {
+    return contextEpisodeId;
+  }
+
+  const pathEpisodeId = location.pathname.match(/\/ep(\d+)/i)?.[1];
+  const queryEpisodeId = new URLSearchParams(location.search).get("ep_id");
+  const episodeId = pathEpisodeId || queryEpisodeId;
+  if (episodeId) {
+    return Number(episodeId);
+  }
+
+  const nextDataElement = document.querySelector<HTMLScriptElement>("#__NEXT_DATA__");
+  if (!nextDataElement?.textContent) {
+    return undefined;
+  }
+
+  try {
+    const nextData = JSON.parse(nextDataElement.textContent) as unknown;
+    return findNumericField(nextData, new Set(["ep_id", "epId", "epid"]));
+  } catch (error: unknown) {
+    console.warn("解析番剧页面数据失败", error);
+    return undefined;
+  }
+}
+
+function findNumericField(value: unknown, fieldNames: Set<string>, depth = 0): number | undefined {
+  if (depth > 8 || value === null || typeof value !== "object") {
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const result = findNumericField(item, fieldNames, depth + 1);
+      if (result) {
+        return result;
+      }
+    }
+    return undefined;
+  }
+
+  for (const [key, item] of Object.entries(value)) {
+    if (fieldNames.has(key)) {
+      const result = typeof item === "number" ? item : Number(item);
+      if (Number.isInteger(result) && result > 0) {
+        return result;
+      }
+    }
+
+    const nestedResult = findNumericField(item, fieldNames, depth + 1);
+    if (nestedResult) {
+      return nestedResult;
+    }
+  }
+
+  return undefined;
+}
+
+function isBilibiliPgcPage(): boolean {
+  return location.pathname.includes("/bangumi/play/");
+}
+
+function getCurrentPgcQuality(): number | undefined {
+  const activeQuality = document.querySelector<HTMLElement>(".squirtle-select-item.active[data-value]");
+  const quality = Number(activeQuality?.dataset.value);
+  if (!Number.isInteger(quality) || quality <= 0) {
+    return undefined;
+  }
+
+  return quality === 16 ? 32 : quality;
+}
+
+function getCurrentBilibiliQuality(): number | undefined {
+  if (isBilibiliPgcPage()) {
+    const pgcQuality = getCurrentPgcQuality();
+    if (pgcQuality) {
+      return pgcQuality;
+    }
+  }
+
+  return getCurrentPlayerContext()?.qn;
+}
+
+function getRequestedBilibiliQuality(): number {
+  return getCurrentBilibiliQuality() || 120;
+}
+
+function getBilibiliPlayData(payload: BilibiliApiResponse<BilibiliPlayData>): BilibiliPlayData | null {
+  const error = getBilibiliApiError(payload);
+  if (error) {
+    throw error;
+  }
+  return payload.data || payload.result || null;
+}
+
+async function resolveBilibiliPgc(): Promise<BilibiliDash | null> {
+  const episodeId = getBilibiliEpisodeId();
+  if (!episodeId) {
+    return null;
+  }
+
+  try {
+    const params = new URLSearchParams({
+      ep_id: String(episodeId),
+      qn: String(getRequestedBilibiliQuality()),
+      fnval: "4048",
+      fourk: "1"
+    });
+    const response = await fetchBilibiliApi(`https://api.bilibili.com/pgc/player/web/playurl?${params}`, {
+      credentials: "include",
+      cache: "no-store",
+      signal
+    });
+    const payload = await parseJson<BilibiliApiResponse<BilibiliPlayData>>(response);
+    return getBilibiliPlayData(payload)?.dash || null;
+  } catch (error: unknown) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      return null;
+    }
+    console.warn("解析 Bilibili 番剧播放信息失败", error);
+    throw error;
+  }
+}
+
 async function resolveBilibili(): Promise<BilibiliDash | null> {
+  if (isBilibiliPgcPage()) {
+    return resolveBilibiliPgc();
+  }
+
   const pagePlayInfo = window.__playinfo__ || window.playinfo;
   if (pagePlayInfo?.dash) {
     return pagePlayInfo.dash;
   }
 
   const bvid = getBilibiliId();
-  if (!bvid) {
+  const aid = getBilibiliAid();
+  if (!bvid && !aid) {
     return null;
   }
 
   try {
-    const viewResponse = await fetch(
-      `https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`,
-      { credentials: "include", signal }
-    );
-    const viewData = await parseJson<{ data?: BilibiliViewData }>(viewResponse);
-    const cid = viewData.data ? getBilibiliCid(viewData.data) : undefined;
+    const cid = await getBilibiliCidForRequest(bvid, aid);
     if (!cid) {
       return null;
     }
 
-    const playResponse = await fetch(
-      `https://api.bilibili.com/x/player/playurl?cid=${cid}&bvid=${bvid}&qn=120&fnval=4048&fourk=1`,
-      { credentials: "include", signal }
-    );
-    const playData = await parseJson<{ data?: { dash?: BilibiliDash } }>(playResponse);
+    const playParams = new URLSearchParams({
+      cid: String(cid),
+      qn: String(getRequestedBilibiliQuality()),
+      fnval: "4048",
+      fourk: "1"
+    });
+    playParams.set(bvid ? "bvid" : "aid", bvid || aid);
+    const playResponse = await fetchBilibiliApi(`https://api.bilibili.com/x/player/playurl?${playParams}`, {
+      credentials: "include",
+      cache: "no-store",
+      signal
+    });
+    const playData = await parseJson<BilibiliApiResponse<{ dash?: BilibiliDash }>>(playResponse);
+    const error = getBilibiliApiError(playData);
+    if (error) {
+      throw error;
+    }
     return playData.data?.dash || null;
   } catch (error: unknown) {
-    if (!(error instanceof DOMException && error.name === "AbortError")) {
-      console.warn("解析 Bilibili 播放信息失败", error);
+    if (error instanceof DOMException && error.name === "AbortError") {
+      return null;
     }
-    return null;
+    console.warn("解析 Bilibili 播放信息失败", error);
+    throw error;
   }
 }
 
-function pickBestBilibili(media: DashMedia[] | undefined): string | null {
+function pickBestBilibili(media: DashMedia[] | undefined, maxQuality?: number): string | null {
   if (!media?.length) {
     return null;
   }
 
-  const maxId = Math.max(...media.map((item) => item.id || 0));
-  const candidates = media.filter((item) => (item.id || 0) === maxId);
+  const qualityLimitedMedia = maxQuality
+    ? media.filter((item) => item.id === undefined || item.id <= maxQuality)
+    : media;
+  const availableMedia = qualityLimitedMedia.length ? qualityLimitedMedia : media;
+  const maxId = Math.max(...availableMedia.map((item) => item.id || 0));
+  const candidates = availableMedia.filter((item) => (item.id || 0) === maxId);
   const best = candidates.reduce((current, item) => {
     return (item.bandwidth || 0) > (current.bandwidth || 0) ? item : current;
   });
@@ -265,10 +531,13 @@ function pickBestBilibili(media: DashMedia[] | undefined): string | null {
 async function fetchWithProgress(
   url: string,
   label: string,
-  overlay: DownloadOverlay
+  overlay: DownloadOverlay,
+  progressStart: number,
+  progressEnd: number
 ): Promise<Uint8Array> {
   const response = await fetch(url, {
     credentials: "omit",
+    cache: "no-store",
     referrerPolicy: "strict-origin-when-cross-origin",
     signal
   });
@@ -279,11 +548,14 @@ async function fetchWithProgress(
   const total = Number(response.headers.get("content-length")) || 0;
   const reader = response.body?.getReader();
   if (!reader) {
-    return new Uint8Array(await response.arrayBuffer());
+    const result = new Uint8Array(await response.arrayBuffer());
+    overlay.setProgress(progressEnd);
+    return result;
   }
 
   let loaded = 0;
   const startedAt = performance.now();
+  let preallocated = total > 0 ? new Uint8Array(total) : undefined;
   const chunks: Uint8Array[] = [];
   overlay.setStep(`正在下载${label}...`);
   overlay.setDetail(total ? `大小 ${formatBytes(total)}` : "大小未知");
@@ -295,11 +567,21 @@ async function fetchWithProgress(
     }
 
     const chunk = value as Uint8Array;
+    if (preallocated && loaded + chunk.length <= preallocated.length) {
+      preallocated.set(chunk, loaded);
+    } else {
+      if (preallocated && loaded > 0) {
+        chunks.push(preallocated.subarray(0, loaded));
+      }
+      preallocated = undefined;
+      chunks.push(chunk);
+    }
     loaded += chunk.length;
-    chunks.push(chunk);
     const elapsed = Math.max((performance.now() - startedAt) / 1000, 0.001);
     const speed = loaded / elapsed;
-    const progress = total ? (loaded / total) * 50 : 0;
+    const progress = total
+      ? progressStart + Math.min(1, loaded / total) * (progressEnd - progressStart)
+      : progressStart;
     const detail = total
       ? `已下载 ${formatBytes(loaded)} / ${formatBytes(total)}，速度 ${formatBytes(speed)}/s，剩余约 ${formatTime((total - loaded) / speed)}`
       : `已下载 ${formatBytes(loaded)}`;
@@ -309,37 +591,90 @@ async function fetchWithProgress(
     reportStatus({ step: `正在下载${label}`, progress: Math.round(progress), detail });
   }
 
+  if (preallocated && loaded <= preallocated.length) {
+    overlay.setProgress(progressEnd);
+    return loaded === preallocated.length ? preallocated : preallocated.subarray(0, loaded);
+  }
+
   const result = new Uint8Array(loaded);
   let offset = 0;
   for (const chunk of chunks) {
     result.set(chunk, offset);
     offset += chunk.length;
   }
+  overlay.setProgress(progressEnd);
   return result;
 }
 
 async function fetchBilibiliDirectUrl(): Promise<string | null> {
+  const currentQuality = getCurrentBilibiliQuality() || 80;
+  const qualityCandidates = currentQuality === 80 ? [80] : [currentQuality, 80];
+
+  if (isBilibiliPgcPage()) {
+    const episodeId = getBilibiliEpisodeId();
+    if (!episodeId) {
+      return null;
+    }
+
+    return fetchBilibiliDurlForQualities(
+      "https://api.bilibili.com/pgc/player/web/playurl",
+      qualityCandidates,
+      (quality) => new URLSearchParams({ ep_id: String(episodeId), qn: String(quality), fnval: "0" })
+    );
+  }
+
   const bvid = getBilibiliId();
-  if (!bvid) {
+  const aid = getBilibiliAid();
+  if (!bvid && !aid) {
     return null;
   }
 
-  const viewResponse = await fetch(
-    `https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`,
-    { credentials: "include", signal }
-  );
-  const viewData = await parseJson<{ data?: BilibiliViewData }>(viewResponse);
-  const cid = viewData.data ? getBilibiliCid(viewData.data) : undefined;
+  const cid = await getBilibiliCidForRequest(bvid, aid);
   if (!cid) {
     return null;
   }
 
-  const playResponse = await fetch(
-    `https://api.bilibili.com/x/player/playurl?cid=${cid}&bvid=${bvid}&qn=80&fnval=0`,
-    { credentials: "include", signal }
-  );
-  const playData = await parseJson<{ data?: { durl?: Array<{ url?: string }> } }>(playResponse);
-  return playData.data?.durl?.[0]?.url || null;
+  return fetchBilibiliDurlForQualities("https://api.bilibili.com/x/player/playurl", qualityCandidates, (quality) => {
+    const playParams = new URLSearchParams({ cid: String(cid), qn: String(quality), fnval: "0" });
+    playParams.set(bvid ? "bvid" : "aid", bvid || aid);
+    return playParams;
+  });
+}
+
+async function fetchBilibiliDurl(endpoint: string, params: URLSearchParams): Promise<string | null> {
+  const response = await fetchBilibiliApi(`${endpoint}?${params}`, {
+    credentials: "include",
+    cache: "no-store",
+    signal
+  });
+  const payload = await parseJson<BilibiliApiResponse<BilibiliPlayData>>(response);
+  return getBilibiliPlayData(payload)?.durl?.[0]?.url || null;
+}
+
+async function fetchBilibiliDurlForQualities(
+  endpoint: string,
+  qualities: number[],
+  createParams: (quality: number) => URLSearchParams
+): Promise<string | null> {
+  let lastError: unknown;
+  for (const quality of qualities) {
+    try {
+      const directUrl = await fetchBilibiliDurl(endpoint, createParams(quality));
+      if (directUrl) {
+        return directUrl;
+      }
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw error;
+      }
+      lastError = error;
+    }
+  }
+
+  if (lastError) {
+    console.warn("获取 Bilibili 直链失败", lastError);
+  }
+  return null;
 }
 
 function triggerBrowserDownload(url: string, filename: string): void {
@@ -387,36 +722,35 @@ function requestDirectDownload(url: string, filename: string): Promise<void> {
   });
 }
 
-async function fallbackTo1080P(overlay: DownloadOverlay, reason: string): Promise<void> {
+async function fallbackToDirectDownload(overlay: DownloadOverlay, reason: string): Promise<void> {
   if (location.hostname.includes("youtube.com")) {
     overlay.setStep("下载失败");
     reportStatus({ step: "下载失败", progress: 0, detail: `YouTube 下载失败: ${reason}`, error: true });
     return;
   }
 
-  overlay.setStep("合并失败，尝试 1080P 直链");
-  reportStatus({ step: "合并失败，尝试 1080P 直链", progress: 60, detail: reason });
+  overlay.setStep("合并失败，提交直链下载");
+  reportStatus({ step: "合并失败，提交直链下载", progress: 60, detail: reason });
   const directUrl = await fetchBilibiliDirectUrl();
   if (!directUrl) {
-    throw new Error("无法获取 1080P 直链");
+    throw new Error("无法获取直链");
   }
 
   const filename = `${sanitizeFilename(document.title || "bilibili")}.mp4`;
   await requestDirectDownload(directUrl, filename);
-  overlay.setStep("已保存 1080P 直链");
+  overlay.setStep("已提交浏览器下载");
   overlay.setProgress(100);
   overlay.done();
   reportStatus({
-    step: "下载完成（1080P直链）",
+    step: "下载已提交",
     progress: 100,
-    detail: `4K 合并失败（${reason}），已保存 1080P`,
-    done: true
+    detail: `合并失败（${reason}），已将直链提交给浏览器`,
+    done: false
   });
-  window.setTimeout(() => overlay.remove(), 5000);
 }
 
 async function createPageAssetUrl(url: string, contentType: string): Promise<string> {
-  const response = await fetch(url);
+  const response = await fetchWithTimeout(url, { cache: "no-store" }, BILIBILI_API_TIMEOUT_MS);
   if (!response.ok) {
     throw new Error(`无法读取 FFmpeg 资源: ${response.status}`);
   }
@@ -477,11 +811,18 @@ async function loadFFmpeg(): Promise<FFmpegSession> {
 
 async function mergeMedia(
   ffmpeg: FFmpeg,
-  video: Uint8Array,
+  video: Uint8Array | undefined,
   audio: Uint8Array,
-  overlay: DownloadOverlay
+  overlay: DownloadOverlay,
+  isAudioOnly: boolean
 ): Promise<{ data: Uint8Array; seconds: number }> {
-  await ffmpeg.writeFile("v.m4s", video, { signal });
+  if (!isAudioOnly && !video) {
+    throw new Error("缺少视频数据");
+  }
+
+  if (video) {
+    await ffmpeg.writeFile("v.m4s", video, { signal });
+  }
   await ffmpeg.writeFile("a.m4s", audio, { signal });
   const startedAt = performance.now();
   const mergeTimer = window.setInterval(() => {
@@ -491,7 +832,19 @@ async function mergeMedia(
   }, 1000);
 
   try {
-    const exitCode = await ffmpeg.exec(["-i", "v.m4s", "-i", "a.m4s", "-c", "copy", "out.mp4"], -1, { signal });
+    const outputFilename = isAudioOnly ? "out.m4a" : "out.mp4";
+    const mergeArgs = isAudioOnly
+      ? ["-y", "-i", "a.m4s", "-vn", "-c:a", "copy", outputFilename]
+      : ["-y", "-i", "v.m4s", "-i", "a.m4s", "-c", "copy", outputFilename];
+    let exitCode = await ffmpeg.exec(mergeArgs, -1, { signal });
+    if (exitCode !== 0 && isAudioOnly) {
+      reportStatus({ step: "正在转码音频", progress: 80, detail: "当前音频编码不适合直接封装，正在转换为 AAC" });
+      exitCode = await ffmpeg.exec(
+        ["-y", "-i", "a.m4s", "-vn", "-c:a", "aac", "-b:a", "192k", outputFilename],
+        -1,
+        { signal }
+      );
+    }
     if (exitCode !== 0) {
       throw new Error(`FFmpeg 合并失败，退出码: ${exitCode}`);
     }
@@ -499,7 +852,7 @@ async function mergeMedia(
     window.clearInterval(mergeTimer);
   }
 
-  const output = await ffmpeg.readFile("out.mp4", "binary", { signal });
+  const output = await ffmpeg.readFile(isAudioOnly ? "out.m4a" : "out.mp4", "binary", { signal });
   if (typeof output === "string") {
     throw new Error("FFmpeg 输出不是二进制数据");
   }
@@ -517,8 +870,19 @@ async function startDownload(): Promise<void> {
 
   window.__BILI_DOWNLOAD_RUNNING__ = true;
   const overlay = createOverlay();
+  const isAudioOnly = window.__BILI_DOWNLOAD_MODE__ === "audio";
+  let overlayRemovalScheduled = false;
   let ffmpeg: FFmpeg | undefined;
   let releaseFFmpeg: (() => void) | undefined;
+
+  const removeOverlayLater = (): void => {
+    if (overlayRemovalScheduled) {
+      return;
+    }
+
+    overlayRemovalScheduled = true;
+    window.setTimeout(() => overlay.remove(), 5000);
+  };
 
   try {
     let media: ResolvedMedia | null;
@@ -533,10 +897,11 @@ async function startDownload(): Promise<void> {
       }
     } else {
       const dash = await resolveBilibili();
+      const currentQuality = getCurrentBilibiliQuality();
       media = dash
         ? {
-            video: pickBestBilibili(dash.video) || "",
-            audio: pickBestBilibili(dash.audio) || ""
+            video: pickBestBilibili(dash.video, currentQuality) || "",
+            audio: pickBestBilibili(dash.audio, currentQuality) || ""
           }
         : null;
       filename = sanitizeFilename(document.title || "bilibili");
@@ -547,39 +912,46 @@ async function startDownload(): Promise<void> {
       }
     }
 
-    if (!media.video || !media.audio) {
+    if (!media.audio || (!isAudioOnly && !media.video)) {
       overlay.setStep("未获取到音视频地址");
       reportStatus({ step: "未获取到音视频地址", progress: 0, detail: "" });
       return;
     }
 
-    let video: Uint8Array;
+    let video: Uint8Array | undefined;
     let audio: Uint8Array;
     try {
-      video = await fetchWithProgress(media.video, "视频", overlay);
-      audio = await fetchWithProgress(media.audio, "音频", overlay);
+      if (!isAudioOnly) {
+        video = await fetchWithProgress(media.video, "视频", overlay, 0, 25);
+      }
+      audio = await fetchWithProgress(media.audio, "音频", overlay, isAudioOnly ? 0 : 25, 50);
     } catch (error: unknown) {
-      if (location.hostname.includes("youtube.com")) {
+      if (isAudioOnly || location.hostname.includes("youtube.com")) {
         throw error;
       }
       const message = error instanceof Error ? error.message : String(error);
-      overlay.setStep("拉取失败，尝试 1080P 直链");
-      reportStatus({ step: "拉取失败，尝试 1080P 直链", progress: 0, detail: message });
+      overlay.setStep("拉取失败，提交直链下载");
+      reportStatus({ step: "拉取失败，提交直链下载", progress: 0, detail: message });
       const directUrl = await fetchBilibiliDirectUrl();
       if (!directUrl) {
         throw error;
       }
       await requestDirectDownload(directUrl, `${filename}.mp4`);
-      overlay.setStep("已保存 1080P 直链");
+      overlay.setStep("已提交浏览器下载");
       overlay.setProgress(100);
       overlay.done();
-      reportStatus({ step: "下载完成（1080P直链）", progress: 100, detail: "由于跨域限制，已保存 1080P MP4", done: true });
-      window.setTimeout(() => overlay.remove(), 5000);
+      reportStatus({
+        step: "下载已提交",
+        progress: 100,
+        detail: "由于音视频直拉失败，已将直链提交给浏览器",
+        done: false
+      });
+      removeOverlayLater();
       return;
     }
 
     overlay.setProgress(50);
-    reportStatus({ step: "已下载音视频数据", progress: 50, detail: "" });
+    reportStatus({ step: isAudioOnly ? "已下载音频数据" : "已下载音视频数据", progress: 50, detail: "" });
     overlay.setStep("正在加载合并组件...");
     const loadStartedAt = performance.now();
     let merged: { data: Uint8Array; seconds: number };
@@ -590,35 +962,46 @@ async function startDownload(): Promise<void> {
 
       const loadSeconds = (performance.now() - loadStartedAt) / 1000;
       reportStatus({ step: "正在加载合并组件", progress: 55, detail: `组件加载用时 ${formatTime(loadSeconds)}` });
-      overlay.setStep("正在合并音视频...");
+      overlay.setStep(isAudioOnly ? "正在封装音频..." : "正在合并音视频...");
       overlay.setDetail(`已加载组件，用时 ${formatTime(loadSeconds)}`);
-      merged = await mergeMedia(ffmpeg, video, audio, overlay);
+      merged = await mergeMedia(ffmpeg, video, audio, overlay, isAudioOnly);
     } catch (error: unknown) {
-      await fallbackTo1080P(overlay, error instanceof Error ? error.message : String(error));
+      if (isAudioOnly) {
+        throw error;
+      }
+      await fallbackToDirectDownload(overlay, error instanceof Error ? error.message : String(error));
+      removeOverlayLater();
       return;
     }
 
     overlay.setProgress(95);
-    reportStatus({ step: "合并完成，正在保存", progress: 95, detail: `合并耗时 ${formatTime(merged.seconds)}` });
+    reportStatus({
+      step: isAudioOnly ? "音频封装完成，正在保存" : "合并完成，正在保存",
+      progress: 95,
+      detail: `处理耗时 ${formatTime(merged.seconds)}`
+    });
     overlay.setStep("正在保存文件...");
-    const outputBuffer = new ArrayBuffer(merged.data.byteLength);
-    new Uint8Array(outputBuffer).set(merged.data);
-    const blob = new Blob([outputBuffer], { type: "video/mp4" });
+    const mergedSize = merged.data.byteLength;
+    const mergeSeconds = merged.seconds;
+    const outputExtension = isAudioOnly ? "m4a" : "mp4";
+    const outputMimeType = isAudioOnly ? "audio/mp4" : "video/mp4";
+    const outputFilename = `${filename}.${outputExtension}`;
+    const blob = new Blob([merged.data as unknown as BlobPart], { type: outputMimeType });
     const objectUrl = URL.createObjectURL(blob);
-    triggerBrowserDownload(objectUrl, `${filename}.mp4`);
+    triggerBrowserDownload(objectUrl, outputFilename);
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
     overlay.setProgress(100);
-    overlay.setStep("下载完成");
-    overlay.setDetail(`合并耗时 ${formatTime(merged.seconds)}，总大小 ${formatBytes(merged.data.byteLength)}`);
+    overlay.setStep("已提交浏览器下载");
+    overlay.setDetail(`处理耗时 ${formatTime(mergeSeconds)}，总大小 ${formatBytes(mergedSize)}`);
     overlay.done();
     reportStatus({
-      step: "下载完成",
+      step: "下载已提交",
       progress: 100,
-      detail: `文件 ${filename}.mp4 已保存到浏览器默认下载目录`,
-      filename: `${filename}.mp4`,
+      detail: `文件 ${outputFilename} 已提交给浏览器下载`,
+      filename: outputFilename,
       done: true
     });
-    window.setTimeout(() => overlay.remove(), 5000);
+    removeOverlayLater();
   } catch (error: unknown) {
     if (error instanceof DOMException && error.name === "AbortError") {
       ffmpeg?.terminate();
@@ -630,8 +1013,12 @@ async function startDownload(): Promise<void> {
     overlay.setDetail(message);
     reportStatus({ step: "下载失败", progress: 0, detail: message, error: true });
     console.error("下载失败", error);
+    removeOverlayLater();
   } finally {
     releaseFFmpeg?.();
+    if (!overlayRemovalScheduled) {
+      overlay.remove();
+    }
     window.__BILI_DOWNLOAD_RUNNING__ = false;
   }
 }
