@@ -202,6 +202,17 @@ function getBilibiliId(): string {
   return location.pathname.match(/\/video\/(BV[\w]+)/i)?.[1] || "";
 }
 
+function getBilibiliPageNumber(): number {
+  const pageNumber = Number(new URLSearchParams(location.search).get("p"));
+  return Number.isInteger(pageNumber) && pageNumber > 0 ? pageNumber : 1;
+}
+
+function getBilibiliCid(data: BilibiliViewData): number | undefined {
+  const pages = data.pages || [];
+  const currentPage = pages[getBilibiliPageNumber() - 1];
+  return currentPage?.cid || data.cid || pages[0]?.cid;
+}
+
 async function resolveBilibili(): Promise<BilibiliDash | null> {
   const pagePlayInfo = window.__playinfo__ || window.playinfo;
   if (pagePlayInfo?.dash) {
@@ -219,7 +230,7 @@ async function resolveBilibili(): Promise<BilibiliDash | null> {
       { credentials: "include", signal }
     );
     const viewData = await parseJson<{ data?: BilibiliViewData }>(viewResponse);
-    const cid = viewData.data?.cid || viewData.data?.pages?.[0]?.cid;
+    const cid = viewData.data ? getBilibiliCid(viewData.data) : undefined;
     if (!cid) {
       return null;
     }
@@ -318,7 +329,7 @@ async function fetchBilibiliDirectUrl(): Promise<string | null> {
     { credentials: "include", signal }
   );
   const viewData = await parseJson<{ data?: BilibiliViewData }>(viewResponse);
-  const cid = viewData.data?.cid || viewData.data?.pages?.[0]?.cid;
+  const cid = viewData.data ? getBilibiliCid(viewData.data) : undefined;
   if (!cid) {
     return null;
   }
@@ -442,12 +453,12 @@ async function loadFFmpeg(): Promise<FFmpegSession> {
   };
 
   try {
-    const [classWorkerURL, coreURL, wasmURL] = await Promise.all([
-      createPageAssetUrl(extensionWorkerURL, "text/javascript"),
-      createPageAssetUrl(extensionCoreURL, "text/javascript"),
-      createPageAssetUrl(extensionWasmURL, "application/wasm")
-    ]);
-    pageAssetUrls.push(classWorkerURL, coreURL, wasmURL);
+    const classWorkerURL = await createPageAssetUrl(extensionWorkerURL, "text/javascript");
+    pageAssetUrls.push(classWorkerURL);
+    const coreURL = await createPageAssetUrl(extensionCoreURL, "text/javascript");
+    pageAssetUrls.push(coreURL);
+    const wasmURL = await createPageAssetUrl(extensionWasmURL, "application/wasm");
+    pageAssetUrls.push(wasmURL);
 
     ffmpeg = new ffmpegNamespace.FFmpeg();
     await ffmpeg.load({ classWorkerURL, coreURL, wasmURL }, { signal });
@@ -500,6 +511,11 @@ async function mergeMedia(
 }
 
 async function startDownload(): Promise<void> {
+  if (window.__BILI_DOWNLOAD_RUNNING__) {
+    return;
+  }
+
+  window.__BILI_DOWNLOAD_RUNNING__ = true;
   const overlay = createOverlay();
   let ffmpeg: FFmpeg | undefined;
   let releaseFFmpeg: (() => void) | undefined;
@@ -616,6 +632,7 @@ async function startDownload(): Promise<void> {
     console.error("下载失败", error);
   } finally {
     releaseFFmpeg?.();
+    window.__BILI_DOWNLOAD_RUNNING__ = false;
   }
 }
 

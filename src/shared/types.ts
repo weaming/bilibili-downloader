@@ -55,7 +55,7 @@ export interface FFmpegWasmNamespace {
 
 export interface BilibiliViewData {
   cid?: number;
-  pages?: Array<{ cid?: number }>;
+  pages?: Array<{ cid?: number; page?: number }>;
 }
 
 export interface YouTubeFormat {
@@ -72,6 +72,8 @@ export interface YouTubePlayerResponse {
 
 declare global {
   interface Window {
+    __BILI_DOWNLOAD_BRIDGE_READY__?: boolean;
+    __BILI_DOWNLOAD_RUNNING__?: boolean;
     __FFMPEG_CLASS_WORKER_URL__?: string;
     __FFMPEG_CORE_URL__?: string;
     __FFMPEG_WASM_URL__?: string;

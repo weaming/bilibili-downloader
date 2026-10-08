@@ -30,6 +30,9 @@ async function startDownload(): Promise<void> {
       return;
     }
 
+    await chrome.storage.local.remove("vd_status");
+    statusElement.textContent = "";
+
     await chrome.scripting.executeScript({
       target: { tabId: tab.id! },
       files: ["content_bridge.js"],
