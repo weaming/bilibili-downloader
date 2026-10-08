@@ -1,0 +1,14 @@
+{
+  "entry": [
+    "scripts/build.ts",
+    "src/background/service-worker.ts",
+    "src/content/bridge.ts",
+    "src/content/main.ts",
+    "src/ffmpeg/runtime.ts",
+    "src/popup/main.ts",
+    "src/shared/format.test.ts"
+  ],
+  "project": ["src/**/*.ts", "scripts/**/*.ts"],
+  "ignore": ["dist/**", "public/**"],
+  "ignoreDependencies": ["@ffmpeg/core"]
+}
