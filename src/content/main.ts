@@ -7,9 +7,7 @@ import type {
   DirectDownloadResult,
   DownloadMode,
   DownloadStatus,
-  FFmpegWasmNamespace,
-  YouTubeFormat,
-  YouTubePlayerResponse
+  FFmpegWasmNamespace
 } from "../shared/types";
 import type { FFmpeg } from "@ffmpeg/ffmpeg";
 import { formatBytes, formatTime, sanitizeFilename } from "../shared/format";
@@ -237,37 +235,6 @@ async function fetchBilibiliApi(url: string, init: RequestInit): Promise<Respons
   }
 
   throw lastError instanceof Error ? lastError : new Error("B 站接口请求失败");
-}
-
-async function resolveYouTube(): Promise<ResolvedMedia | null> {
-  let playerResponse: YouTubePlayerResponse | undefined = window.ytInitialPlayerResponse;
-  if (!playerResponse) {
-    const match = document.documentElement.innerHTML.match(/var ytInitialPlayerResponse = ({.*?});/);
-    if (match) {
-      try {
-        playerResponse = JSON.parse(match[1]) as YouTubePlayerResponse;
-      } catch (error: unknown) {
-        console.warn("解析 YouTube 播放信息失败", error);
-      }
-    }
-  }
-
-  const formats = playerResponse?.streamingData?.adaptiveFormats;
-  if (!formats) {
-    return null;
-  }
-
-  const videos = formats
-    .filter((format: YouTubeFormat) => format.mimeType?.includes("video/mp4") && format.url)
-    .sort((left, right) => (right.bitrate || 0) - (left.bitrate || 0));
-  const audios = formats
-    .filter((format: YouTubeFormat) => format.mimeType?.includes("audio/mp4") && format.url)
-    .sort((left, right) => (right.bitrate || 0) - (left.bitrate || 0));
-
-  if (!videos[0]?.url || !audios[0]?.url) {
-    return null;
-  }
-  return { video: videos[0].url, audio: audios[0].url };
 }
 
 function getBilibiliId(): string {
@@ -723,12 +690,6 @@ function requestDirectDownload(url: string, filename: string): Promise<void> {
 }
 
 async function fallbackToDirectDownload(overlay: DownloadOverlay, reason: string): Promise<void> {
-  if (location.hostname.includes("youtube.com")) {
-    overlay.setStep("下载失败");
-    reportStatus({ step: "下载失败", progress: 0, detail: `YouTube 下载失败: ${reason}`, error: true });
-    return;
-  }
-
   overlay.setStep("合并失败，提交直链下载");
   reportStatus({ step: "合并失败，提交直链下载", progress: 60, detail: reason });
   const directUrl = await fetchBilibiliDirectUrl();
@@ -885,31 +846,19 @@ async function startDownload(): Promise<void> {
   };
 
   try {
-    let media: ResolvedMedia | null;
-    let filename: string;
-    if (location.hostname.includes("youtube.com")) {
-      media = await resolveYouTube();
-      filename = sanitizeFilename(document.title);
-      if (!media) {
-        overlay.setStep("未找到 YouTube 播放信息");
-        reportStatus({ step: "未找到播放信息", progress: 0, detail: "无法解析视频地址，可能是加密视频" });
-        return;
-      }
-    } else {
-      const dash = await resolveBilibili();
-      const currentQuality = getCurrentBilibiliQuality();
-      media = dash
-        ? {
-            video: pickBestBilibili(dash.video, currentQuality) || "",
-            audio: pickBestBilibili(dash.audio, currentQuality) || ""
-          }
-        : null;
-      filename = sanitizeFilename(document.title || "bilibili");
-      if (!media) {
-        overlay.setStep("未找到 Bilibili 播放信息");
-        reportStatus({ step: "未找到播放信息", progress: 0, detail: "可能需要登录或会员权限" });
-        return;
-      }
+    const dash = await resolveBilibili();
+    const currentQuality = getCurrentBilibiliQuality();
+    const media = dash
+      ? {
+          video: pickBestBilibili(dash.video, currentQuality) || "",
+          audio: pickBestBilibili(dash.audio, currentQuality) || ""
+        }
+      : null;
+    const filename = sanitizeFilename(document.title || "bilibili");
+    if (!media) {
+      overlay.setStep("未找到 Bilibili 播放信息");
+      reportStatus({ step: "未找到播放信息", progress: 0, detail: "可能需要登录或会员权限" });
+      return;
     }
 
     if (!media.audio || (!isAudioOnly && !media.video)) {
@@ -926,7 +875,7 @@ async function startDownload(): Promise<void> {
       }
       audio = await fetchWithProgress(media.audio, "音频", overlay, isAudioOnly ? 0 : 25, 50);
     } catch (error: unknown) {
-      if (isAudioOnly || location.hostname.includes("youtube.com")) {
+      if (isAudioOnly) {
         throw error;
       }
       const message = error instanceof Error ? error.message : String(error);

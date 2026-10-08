@@ -11,16 +11,31 @@ const SUBTITLE_CACHE_TTL_MS = 5 * 60 * 1000;
 const sendButtonElement = document.querySelector<HTMLButtonElement>("#send");
 const audioButtonElement = document.querySelector<HTMLButtonElement>("#audio");
 const subtitleButtonElement = document.querySelector<HTMLButtonElement>("#subtitle");
+const actionsElement = document.querySelector<HTMLDivElement>("#actions");
+const pageStateElement = document.querySelector<HTMLDivElement>("#page-state");
+const descriptionElement = document.querySelector<HTMLParagraphElement>("#description");
 const messageElementElement = document.querySelector<HTMLDivElement>("#msg");
 const statusElementElement = document.querySelector<HTMLDivElement>("#status");
 
-if (!sendButtonElement || !audioButtonElement || !subtitleButtonElement || !messageElementElement || !statusElementElement) {
+if (
+  !sendButtonElement ||
+  !audioButtonElement ||
+  !subtitleButtonElement ||
+  !actionsElement ||
+  !pageStateElement ||
+  !descriptionElement ||
+  !messageElementElement ||
+  !statusElementElement
+) {
   throw new Error("弹窗页面缺少必要元素");
 }
 
 const sendButton = sendButtonElement;
 const audioButton = audioButtonElement;
 const subtitleButton = subtitleButtonElement;
+const actions = actionsElement;
+const pageState = pageStateElement;
+const description = descriptionElement;
 const messageElement = messageElementElement;
 const statusElement = statusElementElement;
 
@@ -33,12 +48,40 @@ function clearStatus(): void {
   statusElement.removeAttribute("data-state");
 }
 
-function isSupportedVideoPage(url: string | undefined): boolean {
-  return Boolean(url && /(bilibili\.com\/(video|bangumi\/play)\/|youtube\.com\/watch)/i.test(url));
-}
+type PageKind = "bilibili" | "unsupported";
 
 function isBilibiliPage(url: string | undefined): boolean {
   return Boolean(url && /bilibili\.com\/(video|bangumi\/play)\//i.test(url));
+}
+
+function getPageKind(url: string | undefined): PageKind {
+  if (isBilibiliPage(url)) {
+    return "bilibili";
+  }
+  return "unsupported";
+}
+
+function applyPageState(pageKind: PageKind): void {
+  pageState.dataset.state = pageKind;
+  if (pageKind !== "bilibili") {
+    subtitleButton.hidden = true;
+  }
+  actions.hidden = pageKind === "unsupported";
+
+  if (pageKind === "bilibili") {
+    pageState.textContent = "B 站视频页面";
+    description.textContent = "按当前播放清晰度下载视频，或导出 M4A 音频。";
+    return;
+  }
+
+  pageState.textContent = "当前页面不支持";
+  description.textContent = "请打开 B 站视频播放页后使用下载功能。";
+  clearStatus();
+  setMessage("");
+}
+
+function isSupportedVideoPage(url: string | undefined): boolean {
+  return getPageKind(url) !== "unsupported";
 }
 
 interface SubtitleProbeResult {
@@ -162,7 +205,7 @@ async function startDownload(mode: DownloadMode): Promise<void> {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!isSupportedVideoPage(tab?.url)) {
-      setMessage("请在 B 站或 YouTube 视频播放页使用");
+      setMessage("请在 B 站视频播放页使用");
       return;
     }
 
@@ -272,10 +315,13 @@ async function updateStatus(): Promise<boolean> {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab?.id === undefined) {
+      applyPageState("unsupported");
       clearStatus();
       return false;
     }
 
+    const pageKind = getPageKind(tab.url);
+    applyPageState(pageKind);
     if (!isSupportedVideoPage(tab.url)) {
       clearStatus();
       return false;

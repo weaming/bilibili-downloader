@@ -8,10 +8,49 @@ import {
 
 const DIRECT_DOWNLOAD_KEY_PREFIX = "vd_direct:";
 
+const ACTIVE_ICON_PATHS = {
+  16: "icons/icon_16.png",
+  32: "icons/icon_32.png",
+  48: "icons/icon_48.png",
+  128: "icons/icon_128.png"
+};
+
+const INACTIVE_ICON_PATHS = {
+  16: "icons/icon_16_disabled.png",
+  32: "icons/icon_32_disabled.png",
+  48: "icons/icon_48_disabled.png",
+  128: "icons/icon_128_disabled.png"
+};
+
 interface DirectDownloadRecord {
   tabId: number;
   filename: string;
   pageKey: string;
+}
+
+function isBilibiliVideoPage(url: string | undefined): boolean {
+  return Boolean(url && /bilibili\.com\/(video|bangumi\/play)\//i.test(url));
+}
+
+async function updateActionIcon(tabId: number, url: string | undefined): Promise<void> {
+  await chrome.action.setIcon({
+    tabId,
+    path: isBilibiliVideoPage(url) ? ACTIVE_ICON_PATHS : INACTIVE_ICON_PATHS
+  });
+}
+
+async function updateTabIcon(tabId: number): Promise<void> {
+  const tab = await chrome.tabs.get(tabId);
+  await updateActionIcon(tabId, tab.url);
+}
+
+async function updateActiveTabIcons(): Promise<void> {
+  const activeTabs = await chrome.tabs.query({ active: true });
+  await Promise.all(
+    activeTabs
+      .filter((tab): tab is chrome.tabs.Tab & { id: number } => tab.id !== undefined)
+      .map((tab) => updateActionIcon(tab.id, tab.url))
+  );
 }
 
 function getErrorMessage(error: unknown): string {
@@ -169,6 +208,34 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     .catch((error: unknown) => sendResponse({ ok: false, error: getErrorMessage(error) }));
 
   return true;
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  void updateTabIcon(tabId).catch((error: unknown) => {
+    console.warn("更新标签页图标失败", error);
+  });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url === undefined && changeInfo.status !== "loading") {
+    return;
+  }
+
+  void updateActionIcon(tabId, changeInfo.url || tab.url).catch((error: unknown) => {
+    console.warn("更新页面图标失败", error);
+  });
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  void updateActiveTabIcons().catch((error: unknown) => {
+    console.warn("初始化标签页图标失败", error);
+  });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  void updateActiveTabIcons().catch((error: unknown) => {
+    console.warn("恢复标签页图标失败", error);
+  });
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {

@@ -60,15 +60,56 @@
       }
 
       .description {
-        margin: 6px 0 16px;
+        margin: 6px 0 10px;
         color: var(--muted);
         font-size: 13px;
         line-height: 1.45;
       }
 
+      #page-state {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 14px;
+        padding: 7px 9px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      #page-state::before {
+        width: 7px;
+        height: 7px;
+        flex: 0 0 7px;
+        border-radius: 50%;
+        background: currentColor;
+        content: "";
+      }
+
+      #page-state[data-state="bilibili"] {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+      }
+
+      #page-state[data-state="unsupported"] {
+        border-color: var(--danger);
+        border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+        background: var(--surface);
+        background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+        color: var(--danger);
+      }
+
       .actions {
         display: grid;
         gap: 8px;
+      }
+
+      .actions[hidden] {
+        display: none;
       }
 
       button {
@@ -191,8 +232,9 @@
   </head>
   <body>
     <h3>B站助手</h3>
-    <p class="description">按当前播放清晰度下载视频，或导出 M4A 音频。</p>
-    <div class="actions">
+    <p id="description" class="description">正在识别当前页面……</p>
+    <div id="page-state" data-state="unsupported" role="status" aria-live="polite" aria-atomic="true">正在识别当前页面……</div>
+    <div id="actions" class="actions" hidden>
       <button id="send" class="primary" type="button">下载视频</button>
       <button id="audio" class="secondary" type="button">仅下载音频</button>
       <button id="subtitle" class="secondary" type="button" hidden>复制字幕</button>

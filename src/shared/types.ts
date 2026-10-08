@@ -96,18 +96,6 @@ export interface BilibiliPlayerContext {
   pageKey?: string;
 }
 
-export interface YouTubeFormat {
-  mimeType?: string;
-  url?: string;
-  bitrate?: number;
-}
-
-export interface YouTubePlayerResponse {
-  streamingData?: {
-    adaptiveFormats?: YouTubeFormat[];
-  };
-}
-
 declare global {
   interface Window {
     __BILI_DOWNLOAD_BRIDGE_READY__?: boolean;
@@ -120,7 +108,6 @@ declare global {
     FFmpegWASM?: FFmpegWasmNamespace;
     __playinfo__?: BilibiliPlayInfo;
     playinfo?: BilibiliPlayInfo;
-    ytInitialPlayerResponse?: YouTubePlayerResponse;
   }
 }
 

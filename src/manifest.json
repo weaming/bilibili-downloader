@@ -16,10 +16,8 @@
   "host_permissions": [
     "http://*.bilibili.com/*",
     "https://*.bilibili.com/*",
-    "https://*.youtube.com/*",
     "https://*.bilivideo.com/*",
-    "https://*.hdslb.com/*",
-    "https://*.googlevideo.com/*"
+    "https://*.hdslb.com/*"
   ],
   "background": {
     "service_worker": "service_worker.js"
@@ -44,7 +42,6 @@
       "matches": [
         "http://*.bilibili.com/*",
         "https://*.bilibili.com/*",
-        "https://*.youtube.com/*",
         "https://*.hdslb.com/*"
       ]
     }
